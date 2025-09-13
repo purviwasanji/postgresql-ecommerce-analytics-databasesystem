@@ -1,0 +1,590 @@
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+CREATE EXTENSION IF NOT EXISTS "btree_gin";
+
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone VARCHAR(20),
+    date_of_birth DATE,
+    gender VARCHAR(20),
+    registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE,
+    user_segment VARCHAR(50) DEFAULT 'bronze',
+    total_spent DECIMAL(12,2) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE addresses (
+    address_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    address_type VARCHAR(20) CHECK (address_type IN ('shipping', 'billing')),
+    street_address VARCHAR(255) NOT NULL,
+    city VARCHAR(100) NOT NULL,
+    state VARCHAR(100),
+    postal_code VARCHAR(20),
+    country VARCHAR(100) NOT NULL DEFAULT 'US',
+    is_default BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE categories (
+    category_id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    slug VARCHAR(100) UNIQUE NOT NULL,
+    parent_category_id INTEGER REFERENCES categories(category_id),
+    description TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE products (
+    product_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    sku VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    category_id INTEGER REFERENCES categories(category_id),
+    brand VARCHAR(100),
+    base_price DECIMAL(10,2) NOT NULL CHECK (base_price >= 0),
+    sale_price DECIMAL(10,2) CHECK (sale_price >= 0),
+    cost_price DECIMAL(10,2) CHECK (cost_price >= 0),
+    weight DECIMAL(8,3),
+    dimensions JSONB, -- {width, height, depth}
+    color VARCHAR(50),
+    size VARCHAR(20),
+    material VARCHAR(100),
+    stock_quantity INTEGER DEFAULT 0 CHECK (stock_quantity >= 0),
+    reorder_level INTEGER DEFAULT 10,
+    is_active BOOLEAN DEFAULT TRUE,
+    is_featured BOOLEAN DEFAULT FALSE,
+    average_rating DECIMAL(3,2) DEFAULT 0.00,
+    total_reviews INTEGER DEFAULT 0,
+    tags TEXT[], -- Array of tags for search
+    attributes JSONB, -- Flexible product attributes
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE carts (
+    cart_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    session_id VARCHAR(255), -- For guest users
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '30 days')
+);
+
+CREATE TABLE cart_items (
+    cart_item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cart_id UUID REFERENCES carts(cart_id) ON DELETE CASCADE,
+    product_id UUID REFERENCES products(product_id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price DECIMAL(10,2) NOT NULL,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE orders (
+    order_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_number VARCHAR(20) UNIQUE NOT NULL,
+    user_id UUID REFERENCES users(user_id),
+    order_status VARCHAR(20) DEFAULT 'pending' CHECK (
+        order_status IN ('pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded')
+    ),
+    payment_status VARCHAR(20) DEFAULT 'pending' CHECK (
+        payment_status IN ('pending', 'paid', 'failed', 'refunded', 'partially_refunded')
+    ),
+    subtotal DECIMAL(12,2) NOT NULL,
+    tax_amount DECIMAL(10,2) DEFAULT 0,
+    shipping_amount DECIMAL(10,2) DEFAULT 0,
+    discount_amount DECIMAL(10,2) DEFAULT 0,
+    total_amount DECIMAL(12,2) NOT NULL,
+    currency VARCHAR(3) DEFAULT 'USD',
+    shipping_address_id UUID REFERENCES addresses(address_id),
+    billing_address_id UUID REFERENCES addresses(address_id),
+    payment_method VARCHAR(50),
+    payment_reference VARCHAR(100),
+    notes TEXT,
+    shipped_at TIMESTAMP,
+    delivered_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE order_items (
+    order_item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_id UUID REFERENCES orders(order_id) ON DELETE CASCADE,
+    product_id UUID REFERENCES products(product_id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price DECIMAL(10,2) NOT NULL,
+    total_price DECIMAL(12,2) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE reviews (
+    review_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    product_id UUID REFERENCES products(product_id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    order_id UUID REFERENCES orders(order_id),
+    rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    title VARCHAR(200),
+    comment TEXT,
+    is_verified_purchase BOOLEAN DEFAULT FALSE,
+    helpful_votes INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(product_id, user_id, order_id)
+);
+
+CREATE TABLE user_events (
+    event_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES users(user_id),
+    session_id VARCHAR(255),
+    event_type VARCHAR(50) NOT NULL, -- 'page_view', 'product_view', 'add_to_cart', etc.
+    event_data JSONB,
+    ip_address INET,
+    user_agent TEXT,
+    referrer_url TEXT,
+    page_url TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE inventory_movements (
+    movement_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    product_id UUID REFERENCES products(product_id),
+    movement_type VARCHAR(20) CHECK (movement_type IN ('in', 'out', 'adjustment')),
+    quantity INTEGER NOT NULL,
+    previous_stock INTEGER NOT NULL,
+    new_stock INTEGER NOT NULL,
+    reference_type VARCHAR(50), -- 'order', 'return', 'adjustment', 'restock'
+    reference_id UUID,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by UUID REFERENCES users(user_id)
+);
+
+CREATE INDEX idx_users_email ON users USING btree (email);
+CREATE INDEX idx_users_registration_date ON users USING btree (registration_date);
+CREATE INDEX idx_users_segment ON users USING btree (user_segment);
+CREATE INDEX idx_users_last_login ON users USING btree (last_login);
+
+CREATE INDEX idx_products_category ON products USING btree (category_id);
+CREATE INDEX idx_products_brand ON products USING btree (brand);
+CREATE INDEX idx_products_price ON products USING btree (base_price, sale_price);
+CREATE INDEX idx_products_stock ON products USING btree (stock_quantity);
+CREATE INDEX idx_products_rating ON products USING btree (average_rating);
+CREATE INDEX idx_products_tags ON products USING gin (tags);
+CREATE INDEX idx_products_name_trgm ON products USING gin (name gin_trgm_ops);
+CREATE INDEX idx_products_active_featured ON products USING btree (is_active, is_featured);
+
+CREATE INDEX idx_orders_user_date ON orders USING btree (user_id, created_at);
+CREATE INDEX idx_orders_status ON orders USING btree (order_status, payment_status);
+CREATE INDEX idx_orders_date_range ON orders USING btree (created_at);
+CREATE INDEX idx_orders_total ON orders USING btree (total_amount);
+
+CREATE INDEX idx_user_events_user_type_date ON user_events USING btree (user_id, event_type, created_at);
+CREATE INDEX idx_user_events_session ON user_events USING btree (session_id, created_at);
+CREATE INDEX idx_user_events_date ON user_events USING btree (created_at);
+
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE PROCEDURE update_updated_at_column();
+CREATE TRIGGER update_products_updated_at BEFORE UPDATE ON products
+    FOR EACH ROW EXECUTE PROCEDURE update_updated_at_column();
+CREATE TRIGGER update_orders_updated_at BEFORE UPDATE ON orders
+    FOR EACH ROW EXECUTE PROCEDURE update_updated_at_column();
+
+CREATE OR REPLACE FUNCTION update_product_rating()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE products SET
+        average_rating = (
+            SELECT ROUND(AVG(rating::DECIMAL), 2)
+            FROM reviews
+            WHERE product_id = COALESCE(NEW.product_id, OLD.product_id)
+        ),
+        total_reviews = (
+            SELECT COUNT(*)
+            FROM reviews
+            WHERE product_id = COALESCE(NEW.product_id, OLD.product_id)
+        )
+    WHERE product_id = COALESCE(NEW.product_id, OLD.product_id);
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_product_rating
+    AFTER INSERT OR UPDATE OR DELETE ON reviews
+    FOR EACH ROW EXECUTE PROCEDURE update_product_rating();
+
+CREATE OR REPLACE FUNCTION track_inventory_movement()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND OLD.stock_quantity != NEW.stock_quantity THEN
+        INSERT INTO inventory_movements (
+            product_id, movement_type, quantity, previous_stock, new_stock,
+            reference_type, notes
+        ) VALUES (
+            NEW.product_id,
+            CASE WHEN NEW.stock_quantity > OLD.stock_quantity THEN 'in' ELSE 'out' END,
+            ABS(NEW.stock_quantity - OLD.stock_quantity),
+            OLD.stock_quantity,
+            NEW.stock_quantity,
+            'adjustment',
+            'Automatic tracking'
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_track_inventory
+    AFTER UPDATE ON products
+    FOR EACH ROW EXECUTE PROCEDURE track_inventory_movement();
+
+WITH monthly_cohorts AS (
+    SELECT 
+        user_id,
+        DATE_TRUNC('month', registration_date) AS cohort_month,
+        registration_date
+    FROM users
+),
+user_orders AS (
+    SELECT 
+        o.user_id,
+        DATE_TRUNC('month', o.created_at) AS order_month,
+        o.total_amount,
+        ROW_NUMBER() OVER (PARTITION BY o.user_id ORDER BY o.created_at) AS order_sequence
+    FROM orders o
+    WHERE o.order_status NOT IN ('cancelled', 'refunded')
+),
+cohort_data AS (
+    SELECT 
+        mc.cohort_month,
+        uo.order_month,
+        (EXTRACT(YEAR FROM uo.order_month) - EXTRACT(YEAR FROM mc.cohort_month)) * 12 +
+        (EXTRACT(MONTH FROM uo.order_month) - EXTRACT(MONTH FROM mc.cohort_month)) AS period_number,
+        COUNT(DISTINCT mc.user_id) AS users,
+        SUM(uo.total_amount) AS revenue,
+        AVG(uo.total_amount) AS avg_order_value
+    FROM monthly_cohorts mc
+    LEFT JOIN user_orders uo ON mc.user_id = uo.user_id
+    GROUP BY mc.cohort_month, uo.order_month
+),
+cohort_sizes AS (
+    SELECT 
+        cohort_month,
+        COUNT(DISTINCT user_id) AS cohort_size
+    FROM monthly_cohorts
+    GROUP BY cohort_month
+)
+SELECT 
+    cd.cohort_month,
+    cd.period_number,
+    cd.users,
+    cs.cohort_size,
+    ROUND(100.0 * cd.users / cs.cohort_size, 2) AS retention_rate,
+    cd.revenue,
+    cd.avg_order_value,
+    SUM(cd.revenue) OVER (
+        PARTITION BY cd.cohort_month 
+        ORDER BY cd.period_number 
+        ROWS UNBOUNDED PRECEDING
+    ) AS cumulative_revenue
+FROM cohort_data cd
+JOIN cohort_sizes cs ON cd.cohort_month = cs.cohort_month
+WHERE cd.period_number IS NOT NULL
+ORDER BY cd.cohort_month, cd.period_number;
+
+WITH product_performance AS (
+    SELECT 
+        p.product_id,
+        p.name,
+        p.category_id,
+        c.name AS category_name,
+        COUNT(DISTINCT oi.order_id) AS orders_count,
+        SUM(oi.quantity) AS total_quantity_sold,
+        SUM(oi.total_price) AS total_revenue,
+        AVG(oi.unit_price) AS avg_selling_price,
+        AVG(p.cost_price) AS avg_cost_price,
+        SUM(oi.total_price) - (SUM(oi.quantity) * AVG(p.cost_price)) AS total_profit,
+        p.average_rating,
+        p.total_reviews,
+        RANK() OVER (ORDER BY SUM(oi.total_price) DESC) AS revenue_rank,
+        RANK() OVER (ORDER BY SUM(oi.quantity) DESC) AS quantity_rank
+    FROM products p
+    LEFT JOIN order_items oi ON p.product_id = oi.product_id
+    LEFT JOIN orders o ON oi.order_id = o.order_id AND o.order_status NOT IN ('cancelled', 'refunded')
+    LEFT JOIN categories c ON p.category_id = c.category_id
+    GROUP BY p.product_id, p.name, p.category_id, c.name, p.average_rating, p.total_reviews
+),
+frequently_bought_together AS (
+    SELECT 
+        oi1.product_id AS product_a,
+        oi2.product_id AS product_b,
+        COUNT(*) AS frequency,
+        COUNT(*) * 100.0 / (
+            SELECT COUNT(DISTINCT order_id) 
+            FROM order_items 
+            WHERE product_id = oi1.product_id
+        ) AS lift_percentage
+    FROM order_items oi1
+    JOIN order_items oi2 ON oi1.order_id = oi2.order_id AND oi1.product_id < oi2.product_id
+    GROUP BY oi1.product_id, oi2.product_id
+    HAVING COUNT(*) >= 5
+)
+SELECT 
+    pp.*,
+    CASE 
+        WHEN pp.revenue_rank <= 10 THEN 'Top Revenue'
+        WHEN pp.quantity_rank <= 10 THEN 'Top Quantity'
+        WHEN pp.average_rating >= 4.5 AND pp.total_reviews >= 50 THEN 'Highly Rated'
+        ELSE 'Standard'
+    END AS product_tier,
+    fbt.product_b AS frequently_bought_with,
+    fbt.frequency AS combo_frequency,
+    fbt.lift_percentage
+FROM product_performance pp
+LEFT JOIN frequently_bought_together fbt ON pp.product_id = fbt.product_a
+ORDER BY pp.total_revenue DESC;
+
+WITH rfm_calc AS (
+    SELECT 
+        u.user_id,
+        u.email,
+        u.registration_date,
+        CURRENT_DATE - MAX(o.created_at)::DATE AS recency_days,
+        COUNT(DISTINCT o.order_id) AS frequency,
+        COALESCE(SUM(o.total_amount), 0) AS monetary_value,
+        AVG(o.total_amount) AS avg_order_value,
+        MIN(o.created_at) AS first_order_date,
+        MAX(o.created_at) AS last_order_date
+    FROM users u
+    LEFT JOIN orders o ON u.user_id = o.user_id 
+        AND o.order_status NOT IN ('cancelled', 'refunded')
+    GROUP BY u.user_id, u.email, u.registration_date
+),
+rfm_scores AS (
+    SELECT 
+        *,
+        NTILE(5) OVER (ORDER BY recency_days ASC) AS recency_score,
+        NTILE(5) OVER (ORDER BY frequency DESC) AS frequency_score,
+        NTILE(5) OVER (ORDER BY monetary_value DESC) AS monetary_score
+    FROM rfm_calc
+),
+rfm_segments AS (
+    SELECT 
+        *,
+        CASE 
+            WHEN recency_score >= 4 AND frequency_score >= 4 AND monetary_score >= 4 THEN 'Champions'
+            WHEN recency_score >= 3 AND frequency_score >= 3 AND monetary_score >= 3 THEN 'Loyal Customers'
+            WHEN recency_score >= 4 AND frequency_score <= 2 AND monetary_score <= 2 THEN 'New Customers'
+            WHEN recency_score >= 3 AND frequency_score <= 2 THEN 'Potential Loyalists'
+            WHEN recency_score <= 2 AND frequency_score >= 3 AND monetary_score >= 3 THEN 'At Risk'
+            WHEN recency_score <= 2 AND frequency_score >= 4 THEN 'Cannot Lose Them'
+            WHEN recency_score <= 1 AND frequency_score <= 2 THEN 'Lost Customers'
+            ELSE 'Others'
+        END AS customer_segment,
+        recency_score::text || frequency_score::text || monetary_score::text AS rfm_score
+    FROM rfm_scores
+)
+SELECT 
+    customer_segment,
+    COUNT(*) AS customer_count,
+    ROUND(AVG(recency_days), 1) AS avg_recency_days,
+    ROUND(AVG(frequency), 1) AS avg_frequency,
+    ROUND(AVG(monetary_value), 2) AS avg_monetary_value,
+    ROUND(AVG(avg_order_value), 2) AS avg_order_value,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS segment_percentage
+FROM rfm_segments
+GROUP BY customer_segment
+ORDER BY avg_monetary_value DESC;
+
+WITH daily_sales AS (
+    SELECT 
+        p.product_id,
+        p.name,
+        DATE_TRUNC('day', o.created_at) AS sale_date,
+        SUM(oi.quantity) AS daily_quantity,
+        SUM(oi.total_price) AS daily_revenue,
+        p.stock_quantity
+    FROM products p
+    JOIN order_items oi ON p.product_id = oi.product_id
+    JOIN orders o ON oi.order_id = o.order_id
+    WHERE o.order_status NOT IN ('cancelled', 'refunded')
+        AND o.created_at >= CURRENT_DATE - INTERVAL '90 days'
+    GROUP BY p.product_id, p.name, DATE_TRUNC('day', o.created_at), p.stock_quantity
+),
+sales_trends AS (
+    SELECT 
+        product_id,
+        name,
+        AVG(daily_quantity) AS avg_daily_sales,
+        STDDEV(daily_quantity) AS sales_volatility,
+        stock_quantity,
+        CASE 
+            WHEN AVG(daily_quantity) > 0 
+            THEN stock_quantity / AVG(daily_quantity)
+            ELSE 999
+        END AS days_of_inventory,
+        SUM(daily_quantity) OVER (
+            PARTITION BY product_id 
+            ORDER BY sale_date 
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        ) / 7.0 AS rolling_7day_avg
+    FROM daily_sales
+    GROUP BY product_id, name, stock_quantity
+),
+reorder_recommendations AS (
+    SELECT 
+        st.*,
+        CASE 
+            WHEN days_of_inventory <= 7 THEN 'Critical - Reorder Now'
+            WHEN days_of_inventory <= 14 THEN 'Low - Reorder Soon'
+            WHEN days_of_inventory <= 30 THEN 'Monitor'
+            ELSE 'Adequate'
+        END AS inventory_status,
+        GREATEST(
+            CEIL(avg_daily_sales * 30), -- 30 days of inventory
+            CEIL(avg_daily_sales + (2 * sales_volatility)) * 7 -- Safety stock
+        ) AS recommended_reorder_quantity
+    FROM sales_trends st
+)
+SELECT 
+    rr.*,
+    CASE 
+        WHEN inventory_status IN ('Critical - Reorder Now', 'Low - Reorder Soon') 
+        THEN 'HIGH'
+        WHEN avg_daily_sales > 1 AND inventory_status = 'Monitor' 
+        THEN 'MEDIUM'
+        ELSE 'LOW'
+    END AS priority_level
+FROM reorder_recommendations rr
+ORDER BY 
+    CASE inventory_status
+        WHEN 'Critical - Reorder Now' THEN 1
+        WHEN 'Low - Reorder Soon' THEN 2
+        WHEN 'Monitor' THEN 3
+        ELSE 4
+    END,
+    avg_daily_sales DESC;
+
+WITH geographic_sales AS (
+    SELECT 
+        a.country,
+        a.state,
+        a.city,
+        DATE_TRUNC('month', o.created_at) AS month,
+        COUNT(DISTINCT o.order_id) AS orders,
+        COUNT(DISTINCT o.user_id) AS unique_customers,
+        SUM(o.total_amount) AS revenue,
+        AVG(o.total_amount) AS avg_order_value
+    FROM orders o
+    JOIN addresses a ON o.shipping_address_id = a.address_id
+    WHERE o.order_status NOT IN ('cancelled', 'refunded')
+        AND o.created_at >= CURRENT_DATE - INTERVAL '12 months'
+    GROUP BY a.country, a.state, a.city, DATE_TRUNC('month', o.created_at)
+),
+monthly_growth AS (
+    SELECT 
+        *,
+        LAG(revenue) OVER (
+            PARTITION BY country, state, city 
+            ORDER BY month
+        ) AS prev_month_revenue,
+        LAG(orders) OVER (
+            PARTITION BY country, state, city 
+            ORDER BY month
+        ) AS prev_month_orders
+    FROM geographic_sales
+),
+growth_calculations AS (
+    SELECT 
+        *,
+        CASE 
+            WHEN prev_month_revenue IS NOT NULL AND prev_month_revenue > 0
+            THEN ROUND(
+                ((revenue - prev_month_revenue) / prev_month_revenue * 100), 2
+            )
+            ELSE NULL
+        END AS revenue_growth_pct,
+        CASE 
+            WHEN prev_month_orders IS NOT NULL AND prev_month_orders > 0
+            THEN ROUND(
+                ((orders - prev_month_orders) / prev_month_orders * 100), 2
+            )
+            ELSE NULL
+        END AS orders_growth_pct
+    FROM monthly_growth
+)
+SELECT 
+    country,
+    state,
+    city,
+    COUNT(*) AS months_active,
+    SUM(revenue) AS total_revenue,
+    SUM(orders) AS total_orders,
+    SUM(unique_customers) AS total_unique_customers,
+    ROUND(AVG(avg_order_value), 2) AS avg_aov,
+    ROUND(AVG(revenue_growth_pct), 2) AS avg_monthly_revenue_growth,
+    ROUND(AVG(orders_growth_pct), 2) AS avg_monthly_orders_growth,
+    RANK() OVER (ORDER BY SUM(revenue) DESC) AS revenue_rank
+FROM growth_calculations
+GROUP BY country, state, city
+HAVING COUNT(*) >= 3 -- At least 3 months of data
+ORDER BY total_revenue DESC
+LIMIT 50;
+
+CREATE OR REPLACE VIEW sales_dashboard AS
+SELECT 
+    DATE_TRUNC('day', o.created_at) AS date,
+    COUNT(DISTINCT o.order_id) AS orders_count,
+    COUNT(DISTINCT o.user_id) AS unique_customers,
+    SUM(o.total_amount) AS revenue,
+    AVG(o.total_amount) AS avg_order_value,
+    SUM(oi.quantity) AS items_sold
+FROM orders o
+JOIN order_items oi ON o.order_id = oi.order_id
+WHERE o.order_status NOT IN ('cancelled', 'refunded')
+GROUP BY DATE_TRUNC('day', o.created_at)
+ORDER BY date DESC;
+
+CREATE OR REPLACE VIEW product_performance_summary AS
+SELECT 
+    p.product_id,
+    p.name,
+    p.sku,
+    c.name AS category,
+    p.stock_quantity,
+    COUNT(DISTINCT oi.order_id) AS orders_count,
+    SUM(oi.quantity) AS total_sold,
+    SUM(oi.total_price) AS revenue,
+    p.average_rating,
+    p.total_reviews,
+    CASE 
+        WHEN p.stock_quantity <= p.reorder_level THEN 'Low Stock'
+        WHEN p.stock_quantity = 0 THEN 'Out of Stock'
+        ELSE 'In Stock'
+    END AS stock_status
+FROM products p
+LEFT JOIN categories c ON p.category_id = c.category_id
+LEFT JOIN order_items oi ON p.product_id = oi.product_id
+LEFT JOIN orders o ON oi.order_id = o.order_id 
+    AND o.order_status NOT IN ('cancelled', 'refunded')
+WHERE p.is_active = TRUE
+GROUP BY p.product_id, p.name, p.sku, c.name, p.stock_quantity, 
+         p.reorder_level, p.average_rating, p.total_reviews;
